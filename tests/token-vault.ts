@@ -15,6 +15,15 @@ describe("token-vault", () => {
   anchor.setProvider(provider);
 
   const program = anchor.workspace.TokenVault as Program<TokenVault>;
+  const wallet = provider.wallet as anchor.Wallet;
+
+  const attacker = anchor.web3.Keypair.generate();
+
+  const secondUser = anchor.web3.Keypair.generate();
+
+  let secondUserTokenAccount: anchor.web3.PublicKey;
+  let secondUserPositionPda: anchor.web3.PublicKey;
+  let secondUserPositionBump: number;
 
   let mint: anchor.web3.PublicKey;
 
@@ -28,14 +37,45 @@ describe("token-vault", () => {
   let userPositionBump: number;
 
   let userTokenAccount: anchor.web3.PublicKey;
+  let attackerTokenAccount: anchor.web3.PublicKey;
 
   const vaultTokenAccount = anchor.web3.Keypair.generate();
 
-  const attacker = anchor.web3.Keypair.generate();
-
   before(async () => {
-    const wallet = provider.wallet as anchor.Wallet;
+    // create test in loaclhost: SPL Token mint
+    mint = await createMint(
+      provider.connection,
+      wallet.payer,
+      provider.wallet.publicKey,
+      null,
+      6
+    );
+    
+    // airdrop second user SOL
+    const secondUserSig = await provider.connection.requestAirdrop(
+      secondUser.publicKey,
+      1 * anchor.web3.LAMPORTS_PER_SOL
+    );
 
+    await provider.connection.confirmTransaction(secondUserSig);
+
+    secondUserTokenAccount = await createAssociatedTokenAccount(
+      provider.connection,
+      wallet.payer,
+      mint,
+      secondUser.publicKey
+    );
+
+    await mintTo(
+      provider.connection,
+      wallet.payer,
+      mint,
+      secondUserTokenAccount,
+      wallet.payer,
+      500_000_000
+    );
+
+    // airdrop attacker SOL
     const attackerSig = await provider.connection.requestAirdrop(
       attacker.publicKey,
       1 * anchor.web3.LAMPORTS_PER_SOL
@@ -43,13 +83,11 @@ describe("token-vault", () => {
 
     await provider.connection.confirmTransaction(attackerSig);
 
-    // 在本地创建测试 SPL Token mint
-    mint = await createMint(
+    attackerTokenAccount = await createAssociatedTokenAccount(
       provider.connection,
       wallet.payer,
-      provider.wallet.publicKey,
-      null,
-      6
+      mint,
+      attacker.publicKey
     );
 
     userTokenAccount = await createAssociatedTokenAccount(
@@ -90,6 +128,16 @@ describe("token-vault", () => {
         program.programId
       );
 
+    [secondUserPositionPda, secondUserPositionBump] =
+      anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("user_position"),
+          secondUser.publicKey.toBuffer(),
+          mint.toBuffer(),
+        ],
+        program.programId
+      );
+
     console.log("program id:", program.programId.toBase58());
     console.log("mint:", mint.toBase58());
     console.log("vault config PDA:", vaultConfigPda.toBase58());
@@ -99,6 +147,10 @@ describe("token-vault", () => {
     console.log("vault token account:", vaultTokenAccount.publicKey.toBase58());
     console.log("user position PDA:", userPositionPda.toBase58());
     console.log("user position bump:", userPositionBump);
+    console.log("second user:", secondUser.publicKey.toBase58());
+    console.log("second user token account:", secondUserTokenAccount.toBase58());
+    console.log("second user position PDA:", secondUserPositionPda.toBase58());
+    console.log("second user position bump:", secondUserPositionBump);
     console.log("token program:", TOKEN_PROGRAM_ID.toBase58());
   });
 
@@ -378,7 +430,7 @@ describe("token-vault", () => {
     assert.equal(vaultConfig.paused, false);
   });
 
-  it("admin withdraws tokens from vault", async () => {
+  it.skip("admin withdraws tokens from vault", async () => {
     const withdrawAmount = new anchor.BN(10_000_000);
 
     await program.methods
@@ -430,7 +482,7 @@ describe("token-vault", () => {
     );
   });
 
-  it("fails to admin withdraw while vault is paused", async () => {
+  it.skip("fails to admin withdraw while vault is paused", async () => {
     await program.methods
       .pauseVault()
       .accounts({
@@ -492,7 +544,7 @@ describe("token-vault", () => {
     assert.equal(vaultConfig.paused, true);
   });
 
-  it("fails when non-admin tries to admin withdraw", async () => {
+  it.skip("fails when non-admin tries to admin withdraw", async () => {
     await program.methods
       .unpauseVault()
       .accounts({
@@ -606,8 +658,8 @@ describe("token-vault", () => {
       userPosition.depositedAmount.toString()
     );
 
-    assert.equal(userAccountAfter.amount.toString(), "910000000");
-    assert.equal(vaultAccountAfter.amount.toString(), "90000000");
+    assert.equal(userAccountAfter.amount.toString(), "900000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "100000000");
     assert.equal(userPosition.depositedAmount.toString(), "100000000");
 
     const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
@@ -664,8 +716,8 @@ describe("token-vault", () => {
       userPosition.depositedAmount.toString()
     );
 
-    assert.equal(userAccountAfter.amount.toString(), "910000000");
-    assert.equal(vaultAccountAfter.amount.toString(), "90000000");
+    assert.equal(userAccountAfter.amount.toString(), "900000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "100000000");
     assert.equal(userPosition.depositedAmount.toString(), "100000000");
   });
 
@@ -732,12 +784,504 @@ describe("token-vault", () => {
       userPosition.depositedAmount.toString()
     );
 
-    assert.equal(userAccountAfter.amount.toString(), "910000000");
-    assert.equal(vaultAccountAfter.amount.toString(), "90000000");
+    assert.equal(userAccountAfter.amount.toString(), "900000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "100000000");
     assert.equal(userPosition.depositedAmount.toString(), "100000000");
 
     const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
     
     assert.equal(vaultConfig.paused, true);
+  });
+
+  it("fails when attacker tries to withdraw using another user's position", async () => {
+    await program.methods
+      .unpauseVault()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        admin: provider.wallet.publicKey,
+      })
+      .rpc();
+
+    const unpausedConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+
+    console.log("paused before attacker user withdraw:", unpausedConfig.paused);
+
+    assert.equal(unpausedConfig.paused, false);
+
+    let didFail = false;
+
+    try {
+      await program.methods
+        .userWithdraw(new anchor.BN(10_000_000))
+        .accounts({
+          vaultConfig: vaultConfigPda,
+          vaultAuthority: vaultAuthorityPda,
+          mint,
+          userPosition: userPositionPda,
+          vaultTokenAccount: vaultTokenAccount.publicKey,
+          userTokenAccount: attackerTokenAccount,
+          user: attacker.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([attacker])
+        .rpc();
+    } catch (err) {
+      didFail = true;
+      console.log("expected attacker user withdraw error:", String(err));
+    }
+
+    assert.equal(didFail, true);
+
+    const realUserAccountAfter = await getAccount(
+      provider.connection,
+      userTokenAccount
+    );
+
+    const attackerAccountAfter = await getAccount(
+      provider.connection,
+      attackerTokenAccount
+    );
+
+    const vaultAccountAfter = await getAccount(
+      provider.connection,
+      vaultTokenAccount.publicKey
+    );
+
+    const userPosition = await program.account.userPosition.fetch(userPositionPda);
+
+    console.log(
+      "real user amount after attacker failed withdraw:",
+      realUserAccountAfter.amount.toString()
+    );
+    console.log(
+      "attacker amount after failed withdraw:",
+      attackerAccountAfter.amount.toString()
+    );
+    console.log(
+      "vault amount after attacker failed withdraw:",
+      vaultAccountAfter.amount.toString()
+    );
+    console.log(
+      "position deposited amount after attacker failed withdraw:",
+      userPosition.depositedAmount.toString()
+    );
+
+    assert.equal(realUserAccountAfter.amount.toString(), "900000000");
+    assert.equal(attackerAccountAfter.amount.toString(), "0");
+    assert.equal(vaultAccountAfter.amount.toString(), "100000000");
+    assert.equal(userPosition.depositedAmount.toString(), "100000000"); 
+  });
+
+  it("admin withdraws tokens from vault and updates user position", async () => {
+    const withdrawAmount = new anchor.BN(10_000_000);
+
+    await program.methods
+      .adminWithdraw(withdrawAmount)
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        vaultAuthority: vaultAuthorityPda,
+        mint,
+        userPosition: userPositionPda,
+        vaultTokenAccount: vaultTokenAccount.publicKey,
+        userTokenAccount,
+        recipient: provider.wallet.publicKey,
+        admin: provider.wallet.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .rpc();
+
+    const userAccountAfter = await getAccount(
+      provider.connection,
+      userTokenAccount
+    );
+
+    const vaultAccountAfter = await getAccount(
+      provider.connection,
+      vaultTokenAccount.publicKey
+    );
+
+    const userPosition = await program.account.userPosition.fetch(userPositionPda);
+
+    console.log(
+      "user amount after admin withdraw:",
+      userAccountAfter.amount.toString()
+    );
+    console.log(
+      "vault amount after admin withdraw:",
+      vaultAccountAfter.amount.toString()
+    );
+    console.log(
+      "position deposited amount after admin withdraw:",
+      userPosition.depositedAmount.toString()
+    );
+
+    assert.equal(userAccountAfter.amount.toString(), "910000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "90000000");
+    assert.equal(userPosition.depositedAmount.toString(), "90000000");
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+    
+    assert.equal(vaultConfig.paused, false);
+  });
+
+  it("fails to admin withdraw while vault is paused", async () => {
+    await program.methods
+      .pauseVault()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        admin: provider.wallet.publicKey,
+      })
+      .rpc();
+
+    const pausedConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+
+    console.log("paused before failed admin withdraw:", pausedConfig.paused);
+
+    assert.equal(pausedConfig.paused, true);
+
+    let didFail = false;
+
+    try {
+      await program.methods
+        .adminWithdraw(new anchor.BN(10_000_000))
+        .accounts({
+          vaultConfig: vaultConfigPda,
+          vaultAuthority: vaultAuthorityPda,
+          mint,
+          userPosition: userPositionPda,
+          vaultTokenAccount: vaultTokenAccount.publicKey,
+          userTokenAccount,
+          recipient: provider.wallet.publicKey,
+          admin: provider.wallet.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+    } catch (err) {
+      didFail = true;
+      console.log("expected paused admin withdraw error:", String(err));
+    }
+
+    assert.equal(didFail, true);
+
+    const userAccountAfter = await getAccount(
+      provider.connection,
+      userTokenAccount
+    );
+
+    const vaultAccountAfter = await getAccount(
+      provider.connection,
+      vaultTokenAccount.publicKey
+    );
+
+    const userPosition = await program.account.userPosition.fetch(userPositionPda);
+
+    console.log(
+      "user amount after failed paused admin withdraw:",
+      userAccountAfter.amount.toString()
+    );
+    console.log(
+      "vault amount after failed paused admin withdraw:",
+      vaultAccountAfter.amount.toString()
+    );
+    console.log(
+      "position deposited amount after failed paused admin withdraw:",
+      userPosition.depositedAmount.toString()
+    );
+
+    assert.equal(userAccountAfter.amount.toString(), "910000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "90000000");
+    assert.equal(userPosition.depositedAmount.toString(), "90000000");
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+    
+    assert.equal(vaultConfig.paused, true);
+  });
+
+  it("fails when non-admin tries to admin withdraw", async () => {
+    await program.methods
+      .unpauseVault()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        admin: provider.wallet.publicKey,
+      })
+      .rpc();
+
+    const unpausedConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+
+    console.log("paused before non-admin admin withdraw:", unpausedConfig.paused);
+
+    assert.equal(unpausedConfig.paused, false);
+
+    let didFail = false;
+
+    try {
+      await program.methods
+        .adminWithdraw(new anchor.BN(10_000_000))
+        .accounts({
+          vaultConfig: vaultConfigPda,
+          vaultAuthority: vaultAuthorityPda,
+          mint,
+          userPosition: userPositionPda,
+          vaultTokenAccount: vaultTokenAccount.publicKey,
+          userTokenAccount,
+          recipient: provider.wallet.publicKey,
+          admin: attacker.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([attacker])
+        .rpc();
+    } catch (err) {
+      didFail = true;
+      console.log("expected non-admin admin withdraw error:", String(err));
+    }
+
+    assert.equal(didFail, true);
+
+    const userAccountAfter = await getAccount(
+      provider.connection,
+      userTokenAccount
+    );
+
+    const vaultAccountAfter = await getAccount(
+      provider.connection,
+      vaultTokenAccount.publicKey
+    );
+
+    const userPosition = await program.account.userPosition.fetch(userPositionPda);
+
+    console.log(
+      "user amount after non-admin failed admin withdraw:",
+      userAccountAfter.amount.toString()
+    );
+
+    console.log(
+      "vault amount after non-admin failed admin withdraw:",
+      vaultAccountAfter.amount.toString()
+    );
+
+    console.log(
+      "position deposited amount after non-admin failed admin withdraw:",
+      userPosition.depositedAmount.toString()
+    );
+
+    assert.equal(userAccountAfter.amount.toString(), "910000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "90000000");
+    assert.equal(userPosition.depositedAmount.toString(), "90000000");
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+    
+    assert.equal(vaultConfig.paused, false);
+  });
+
+  it("fails when admin withdraws more than recipient position balance", async () => {
+    let didFail = false;
+
+    try {
+      await program.methods
+        .adminWithdraw(new anchor.BN(200_000_000))
+        .accounts({
+          vaultConfig: vaultConfigPda,
+          vaultAuthority: vaultAuthorityPda,
+          mint,
+          userPosition: userPositionPda,
+          vaultTokenAccount: vaultTokenAccount.publicKey,
+          userTokenAccount,
+          recipient: provider.wallet.publicKey,
+          admin: provider.wallet.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+    } catch (err) {
+      didFail = true;
+      console.log("expected over-admin-withdraw error:", String(err));
+    }
+
+    assert.equal(didFail, true);
+
+    const userAccountAfter = await getAccount(
+      provider.connection,
+      userTokenAccount
+    );
+
+    const vaultAccountAfter = await getAccount(
+      provider.connection,
+      vaultTokenAccount.publicKey
+    );
+
+    const userPosition = await program.account.userPosition.fetch(userPositionPda);
+
+    console.log(
+      "user amount after failed over-admin-withdraw:",
+      userAccountAfter.amount.toString()
+    );
+
+    console.log(
+      "vault amount after failed over-admin-withdraw:",
+      vaultAccountAfter.amount.toString()
+    );
+
+    console.log(
+      "position deposited amount after failed over-admin-withdraw:",
+      userPosition.depositedAmount.toString()
+    );
+
+    assert.equal(userAccountAfter.amount.toString(), "910000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "90000000");
+    assert.equal(userPosition.depositedAmount.toString(), "90000000");
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+    assert.equal(vaultConfig.paused, false);
+  });
+
+  it("initializes second user position", async () => {
+    await program.methods
+      .initializePosition()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        userPosition: secondUserPositionPda,
+        mint,
+        user: secondUser.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .signers([secondUser])
+      .rpc();
+
+    const secondUserPosition = await program.account.userPosition.fetch(
+      secondUserPositionPda
+    );
+
+    console.log("second position user:", secondUserPosition.user.toBase58());
+    console.log("second position mint:", secondUserPosition.mint.toBase58());
+    console.log(
+      "second position deposited amount:",
+      secondUserPosition.depositedAmount.toString()
+    );
+    console.log("second position bump:", secondUserPosition.bump);
+
+    assert.equal(
+      secondUserPosition.user.toBase58(),
+      secondUser.publicKey.toBase58()
+    );
+    assert.equal(secondUserPosition.mint.toBase58(), mint.toBase58());
+    assert.equal(secondUserPosition.depositedAmount.toString(), "0");
+    assert.equal(secondUserPosition.bump, secondUserPositionBump);
+  });
+
+  it("second user deposits independently", async () => {
+    const depositAmount = new anchor.BN(50_000_000);
+
+    await program.methods
+      .deposit(depositAmount)
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        vaultAuthority: vaultAuthorityPda,
+        mint,
+        userPosition: secondUserPositionPda,
+        userTokenAccount: secondUserTokenAccount,
+        vaultTokenAccount: vaultTokenAccount.publicKey,
+        user: secondUser.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([secondUser])
+      .rpc();
+
+    const secondUserAccountAfter = await getAccount(
+      provider.connection,
+      secondUserTokenAccount
+    );
+
+    const vaultAccountAfter = await getAccount(
+      provider.connection,
+      vaultTokenAccount.publicKey
+    );
+
+    const secondUserPosition = await program.account.userPosition.fetch(
+      secondUserPositionPda
+    );
+
+    const mainUserPosition = await program.account.userPosition.fetch(
+      userPositionPda
+    );
+
+    console.log(
+      "second user amount after deposit:",
+      secondUserAccountAfter.amount.toString()
+    );
+    console.log(
+      "vault amount after second user deposit:",
+      vaultAccountAfter.amount.toString()
+    );
+    console.log(
+      "second position deposited amount after deposit:",
+      secondUserPosition.depositedAmount.toString()
+    );
+    console.log(
+      "main position deposited amount after second user deposit:",
+      mainUserPosition.depositedAmount.toString()
+    );
+
+    assert.equal(secondUserAccountAfter.amount.toString(), "450000000");
+    assert.equal(secondUserPosition.depositedAmount.toString(), "50000000");
+    assert.equal(mainUserPosition.depositedAmount.toString(), "90000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "140000000");
+  });
+
+  it("second user deposits independently", async () => {
+    const withdrawAmount = new anchor.BN(20_000_000);
+
+    await program.methods
+      .userWithdraw(withdrawAmount)
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        vaultAuthority: vaultAuthorityPda,
+        mint,
+        userPosition: secondUserPositionPda,
+        vaultTokenAccount: vaultTokenAccount.publicKey,
+        userTokenAccount: secondUserTokenAccount,
+        user: secondUser.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID
+      })
+      .signers([secondUser])
+      .rpc();
+    
+    const secondUserAccountAfter = await getAccount(
+      provider.connection,
+      secondUserTokenAccount
+    );
+
+    const vaultAccountAfter = await getAccount(
+      provider.connection,
+      vaultTokenAccount.publicKey
+    );
+
+    const secondUserPosition = await program.account.userPosition.fetch(
+      secondUserPositionPda
+    );
+
+    const mainUserPosition = await program.account.userPosition.fetch(
+      userPositionPda
+    );
+
+    console.log(
+      "second user amount after withdraw:",
+      secondUserAccountAfter.amount.toString()
+    );
+    console.log(
+      "vault amount after second user withdraw:",
+      vaultAccountAfter.amount.toString()
+    );
+    console.log(
+      "second position deposited amount after withdraw:",
+      secondUserPosition.depositedAmount.toString()
+    );
+    console.log(
+      "main position deposited amount after second user withdraw:",
+      mainUserPosition.depositedAmount.toString()
+    );
+
+    assert.equal(secondUserAccountAfter.amount.toString(), "470000000");
+    assert.equal(vaultAccountAfter.amount.toString(), "120000000");
+    assert.equal(secondUserPosition.depositedAmount.toString(), "30000000");
+    assert.equal(mainUserPosition.depositedAmount.toString(), "90000000");
   });
 });

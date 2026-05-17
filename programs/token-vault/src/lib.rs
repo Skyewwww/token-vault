@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("2xynrcTArXh3Vk4rKvMqeKKM6d1eJWgkPG3z7hKKxXZF");
@@ -104,6 +105,18 @@ pub mod token_vault {
         let vault_config = &ctx.accounts.vault_config;
 
         require!(!vault_config.paused, VaultError::Paused);
+
+        let user_position = &mut ctx.accounts.user_position;
+
+        require!(
+            user_position.deposited_amount >= amount,  
+            VaultError::InsufficientPositionBalance
+        );
+
+        user_position.deposited_amount = user_position
+            .deposited_amount
+            .checked_sub(amount)
+            .ok_or(VaultError::MathOverflow)?;
 
         let mint_key = ctx.accounts.mint.key();
         
@@ -295,6 +308,19 @@ pub struct AdminWithdraw<'info> {
 
     #[account(
         mut,
+        seeds = [
+            b"user_position",
+            recipient.key().as_ref(),
+            mint.key().as_ref()
+        ],
+        bump = user_position.bump,
+        has_one = mint,
+        constraint = user_position.user == recipient.key()
+    )]
+    pub user_position: Account<'info, UserPosition>,
+
+    #[account(
+        mut,
         token::mint = mint,
         token::authority = vault_authority
     )]
@@ -302,9 +328,13 @@ pub struct AdminWithdraw<'info> {
 
     #[account(
         mut,
-        token::mint = mint
+        token::mint = mint,
+        token::authority = recipient
     )]
     pub user_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: This account is only used as the recipient identity.
+    pub recipient: UncheckedAccount<'info>,
 
     pub admin: Signer<'info>,
 

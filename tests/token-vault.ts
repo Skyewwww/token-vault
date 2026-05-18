@@ -2,9 +2,11 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { TokenVault } from "../target/types/token_vault";
 import {
-  createMint,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   createAssociatedTokenAccount,
+  createMint,
   getAccount,
+  getAssociatedTokenAddress,
   mintTo,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
@@ -21,9 +23,16 @@ describe("token-vault", () => {
 
   const secondUser = anchor.web3.Keypair.generate();
 
+  const closeUser = anchor.web3.Keypair.generate();
+
+  const newAdmin = anchor.web3.Keypair.generate();
+
   let secondUserTokenAccount: anchor.web3.PublicKey;
   let secondUserPositionPda: anchor.web3.PublicKey;
   let secondUserPositionBump: number;
+
+  let closeUserPositionPda: anchor.web3.PublicKey;
+  let closeUserPositionBump: number;
 
   let mint: anchor.web3.PublicKey;
 
@@ -38,8 +47,7 @@ describe("token-vault", () => {
 
   let userTokenAccount: anchor.web3.PublicKey;
   let attackerTokenAccount: anchor.web3.PublicKey;
-
-  const vaultTokenAccount = anchor.web3.Keypair.generate();
+  let vaultTokenAccount: anchor.web3.PublicKey;
 
   before(async () => {
     // create test in loaclhost: SPL Token mint
@@ -50,6 +58,20 @@ describe("token-vault", () => {
       null,
       6
     );
+
+    const newAdminSig = await provider.connection.requestAirdrop(
+      newAdmin.publicKey,
+      1 * anchor.web3.LAMPORTS_PER_SOL
+    );
+
+    await provider.connection.confirmTransaction(newAdminSig);
+
+    const closeUserSig = await provider.connection.requestAirdrop(
+      closeUser.publicKey,
+      1 * anchor.web3.LAMPORTS_PER_SOL
+    );
+
+    await provider.connection.confirmTransaction(closeUserSig);
     
     // airdrop second user SOL
     const secondUserSig = await provider.connection.requestAirdrop(
@@ -137,6 +159,24 @@ describe("token-vault", () => {
         ],
         program.programId
       );
+    
+    [closeUserPositionPda, closeUserPositionBump] =
+      anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("user_position"),
+          closeUser.publicKey.toBuffer(),
+          mint.toBuffer(),
+        ],
+        program.programId
+      );
+    
+    vaultTokenAccount = await getAssociatedTokenAddress(
+      mint,
+      vaultAuthorityPda,
+      true,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
 
     console.log("program id:", program.programId.toBase58());
     console.log("mint:", mint.toBase58());
@@ -144,7 +184,7 @@ describe("token-vault", () => {
     console.log("vault config bump:", vaultConfigBump);
     console.log("vault authority PDA:", vaultAuthorityPda.toBase58());
     console.log("vault authority bump:", vaultAuthorityBump);
-    console.log("vault token account:", vaultTokenAccount.publicKey.toBase58());
+    console.log("vault token ATA:", vaultTokenAccount.toBase58());
     console.log("user position PDA:", userPositionPda.toBase58());
     console.log("user position bump:", userPositionBump);
     console.log("second user:", secondUser.publicKey.toBase58());
@@ -173,13 +213,13 @@ describe("token-vault", () => {
       .accounts({
         vaultConfig: vaultConfigPda,
         vaultAuthority: vaultAuthorityPda,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         mint,
         admin: provider.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
-      .signers([vaultTokenAccount])
       .rpc();
 
     console.log("initialize vault transaction success");
@@ -205,7 +245,7 @@ describe("token-vault", () => {
 
     assert.equal(
       vaultConfig.vaultTokenAccount.toBase58(),
-      vaultTokenAccount.publicKey.toBase58()
+      vaultTokenAccount.toBase58()
     );
 
     assert.equal(vaultConfig.vaultAuthorityBump, vaultAuthorityBump);
@@ -214,7 +254,7 @@ describe("token-vault", () => {
 
     const tokenAccount = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     console.log("token account mint:", tokenAccount.mint.toBase58());
@@ -268,7 +308,7 @@ describe("token-vault", () => {
         mint,
         userPosition: userPositionPda,
         userTokenAccount,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         user: provider.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
@@ -281,7 +321,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     console.log("user amount after deposit:", userAccountAfter.amount.toString());
@@ -318,7 +358,7 @@ describe("token-vault", () => {
     assert.equal(vaultConfig.mint.toBase58(), mint.toBase58());
     assert.equal(
       vaultConfig.vaultTokenAccount.toBase58(),
-      vaultTokenAccount.publicKey.toBase58()
+      vaultTokenAccount.toBase58()
     );
   });
 
@@ -333,7 +373,7 @@ describe("token-vault", () => {
           vaultAuthority: vaultAuthorityPda,
           mint,
           userTokenAccount,
-          vaultTokenAccount: vaultTokenAccount.publicKey,
+          vaultTokenAccount,
           user: provider.wallet.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
@@ -352,7 +392,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     console.log("user amount after failed deposit:", userAccountAfter.amount.toString());
@@ -383,7 +423,7 @@ describe("token-vault", () => {
     assert.equal(vaultConfig.mint.toBase58(), mint.toBase58());
     assert.equal(
       vaultConfig.vaultTokenAccount.toBase58(),
-      vaultTokenAccount.publicKey.toBase58()
+      vaultTokenAccount.toBase58()
     );
   });
 
@@ -397,7 +437,7 @@ describe("token-vault", () => {
         vaultAuthority: vaultAuthorityPda,
         mint,
         userTokenAccount,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         user: provider.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
@@ -410,7 +450,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     console.log(
@@ -439,7 +479,7 @@ describe("token-vault", () => {
         vaultConfig: vaultConfigPda,
         vaultAuthority: vaultAuthorityPda,
         mint,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         userTokenAccount,
         admin: provider.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -453,7 +493,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     console.log(
@@ -478,7 +518,7 @@ describe("token-vault", () => {
     assert.equal(vaultConfig.mint.toBase58(), mint.toBase58());
     assert.equal(
       vaultConfig.vaultTokenAccount.toBase58(),
-      vaultTokenAccount.publicKey.toBase58()
+      vaultTokenAccount.toBase58()
     );
   });
 
@@ -504,7 +544,7 @@ describe("token-vault", () => {
         vaultConfig: vaultConfigPda,
         vaultAuthority: vaultAuthorityPda,
         mint,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         userTokenAccount,
         admin: provider.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -524,7 +564,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     console.log(
@@ -566,7 +606,7 @@ describe("token-vault", () => {
         vaultConfig: vaultConfigPda,
         vaultAuthority: vaultAuthorityPda,
         mint,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         userTokenAccount,
         admin: provider.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -587,7 +627,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     console.log(
@@ -612,7 +652,7 @@ describe("token-vault", () => {
     assert.equal(vaultConfig.mint.toBase58(), mint.toBase58());
     assert.equal(
       vaultConfig.vaultTokenAccount.toBase58(),
-      vaultTokenAccount.publicKey.toBase58()
+      vaultTokenAccount.toBase58()
     );
   });
 
@@ -626,7 +666,7 @@ describe("token-vault", () => {
         vaultAuthority: vaultAuthorityPda,
         mint,
         userPosition: userPositionPda,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         userTokenAccount,
         user: provider.wallet.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
@@ -640,7 +680,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -678,7 +718,7 @@ describe("token-vault", () => {
           vaultAuthority: vaultAuthorityPda,
           mint,
           userPosition: userPositionPda,
-          vaultTokenAccount: vaultTokenAccount.publicKey,
+          vaultTokenAccount,
           userTokenAccount,
           user: provider.wallet.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
@@ -698,7 +738,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -746,7 +786,7 @@ describe("token-vault", () => {
           vaultAuthority: vaultAuthorityPda,
           mint,
           userPosition: userPositionPda,
-          vaultTokenAccount: vaultTokenAccount.publicKey,
+          vaultTokenAccount,
           userTokenAccount,
           user: provider.wallet.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
@@ -766,7 +806,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -818,7 +858,7 @@ describe("token-vault", () => {
           vaultAuthority: vaultAuthorityPda,
           mint,
           userPosition: userPositionPda,
-          vaultTokenAccount: vaultTokenAccount.publicKey,
+          vaultTokenAccount,
           userTokenAccount: attackerTokenAccount,
           user: attacker.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
@@ -844,7 +884,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -882,7 +922,7 @@ describe("token-vault", () => {
         vaultAuthority: vaultAuthorityPda,
         mint,
         userPosition: userPositionPda,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         userTokenAccount,
         recipient: provider.wallet.publicKey,
         admin: provider.wallet.publicKey,
@@ -897,7 +937,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -949,7 +989,7 @@ describe("token-vault", () => {
           vaultAuthority: vaultAuthorityPda,
           mint,
           userPosition: userPositionPda,
-          vaultTokenAccount: vaultTokenAccount.publicKey,
+          vaultTokenAccount,
           userTokenAccount,
           recipient: provider.wallet.publicKey,
           admin: provider.wallet.publicKey,
@@ -970,7 +1010,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -1022,7 +1062,7 @@ describe("token-vault", () => {
           vaultAuthority: vaultAuthorityPda,
           mint,
           userPosition: userPositionPda,
-          vaultTokenAccount: vaultTokenAccount.publicKey,
+          vaultTokenAccount,
           userTokenAccount,
           recipient: provider.wallet.publicKey,
           admin: attacker.publicKey,
@@ -1044,7 +1084,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -1084,7 +1124,7 @@ describe("token-vault", () => {
           vaultAuthority: vaultAuthorityPda,
           mint,
           userPosition: userPositionPda,
-          vaultTokenAccount: vaultTokenAccount.publicKey,
+          vaultTokenAccount,
           userTokenAccount,
           recipient: provider.wallet.publicKey,
           admin: provider.wallet.publicKey,
@@ -1105,7 +1145,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const userPosition = await program.account.userPosition.fetch(userPositionPda);
@@ -1178,7 +1218,7 @@ describe("token-vault", () => {
         mint,
         userPosition: secondUserPositionPda,
         userTokenAccount: secondUserTokenAccount,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         user: secondUser.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
@@ -1192,7 +1232,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const secondUserPosition = await program.account.userPosition.fetch(
@@ -1236,7 +1276,7 @@ describe("token-vault", () => {
         vaultAuthority: vaultAuthorityPda,
         mint,
         userPosition: secondUserPositionPda,
-        vaultTokenAccount: vaultTokenAccount.publicKey,
+        vaultTokenAccount,
         userTokenAccount: secondUserTokenAccount,
         user: secondUser.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID
@@ -1251,7 +1291,7 @@ describe("token-vault", () => {
 
     const vaultAccountAfter = await getAccount(
       provider.connection,
-      vaultTokenAccount.publicKey
+      vaultTokenAccount
     );
 
     const secondUserPosition = await program.account.userPosition.fetch(
@@ -1283,5 +1323,177 @@ describe("token-vault", () => {
     assert.equal(vaultAccountAfter.amount.toString(), "120000000");
     assert.equal(secondUserPosition.depositedAmount.toString(), "30000000");
     assert.equal(mainUserPosition.depositedAmount.toString(), "90000000");
+  });
+
+  it("fails to close non-empty user position", async () => {
+    const positionBefore = await program.account.userPosition.fetch(
+      userPositionPda
+    );
+
+    let didFail = false;
+
+    try {
+      await program.methods
+        .closePosition()
+        .accounts({
+          vaultConfig: vaultConfigPda,
+          mint,
+          userPosition: userPositionPda,
+          user: provider.wallet.publicKey,
+        })
+        .rpc();
+    } catch (err) {
+      didFail = true;
+      console.log("expected close non-empty position error:", String(err));
+    }
+
+    assert.equal(didFail, true);
+
+    const positionAfter = await program.account.userPosition.fetch(
+      userPositionPda
+    );
+
+    assert.equal(
+      positionAfter.depositedAmount.toString(),
+      positionBefore.depositedAmount.toString()
+    );
+    assert.equal(
+      positionAfter.user.toBase58(),
+      provider.wallet.publicKey.toBase58()
+    );
+    assert.equal(positionAfter.mint.toBase58(), mint.toBase58());
+  });
+
+  it("closes empty user position", async () => {
+    await program.methods
+      .initializePosition()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        userPosition: closeUserPositionPda,
+        mint,
+        user: closeUser.publicKey,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .signers([closeUser])
+      .rpc();
+
+    const closeUserPosition = await program.account.userPosition.fetch(
+      closeUserPositionPda
+    );
+
+    console.log(
+      "close user position amount before close:",
+      closeUserPosition.depositedAmount.toString()
+    );
+
+    assert.equal(closeUserPosition.depositedAmount.toString(), "0");
+    assert.equal(closeUserPosition.user.toBase58(), closeUser.publicKey.toBase58());
+    assert.equal(closeUserPosition.mint.toBase58(), mint.toBase58());
+    assert.equal(closeUserPosition.bump, closeUserPositionBump);
+
+    await program.methods
+      .closePosition()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        mint,
+        userPosition: closeUserPositionPda,
+        user: closeUser.publicKey,
+      })
+      .signers([closeUser])
+      .rpc();
+
+    let didFailToFetch = false;
+
+    try {
+      await program.account.userPosition.fetch(closeUserPositionPda);
+    } catch (err) {
+      didFailToFetch = true;
+      console.log("expected fetch closed position error:", String(err));
+    }
+
+    assert.equal(didFailToFetch, true);
+  });
+
+  it("transfers admin to new admin", async () => {
+    await program.methods
+      .transferAdmin()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        mint,
+        admin: provider.wallet.publicKey,
+        newAdmin: newAdmin.publicKey,
+      })
+      .rpc();
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+
+    console.log("admin after transfer:", vaultConfig.admin.toBase58());
+
+    assert.equal(vaultConfig.admin.toBase58(), newAdmin.publicKey.toBase58());
+    assert.equal(vaultConfig.mint.toBase58(), mint.toBase58());
+    assert.equal(
+      vaultConfig.vaultTokenAccount.toBase58(),
+      vaultTokenAccount.toBase58()
+    );
+  });
+
+  it("fails when old admin tries to pause after admin transfer", async () => {
+    let didFail = false;
+
+    try {
+      await program.methods
+        .pauseVault()
+        .accounts({
+          vaultConfig: vaultConfigPda,
+          admin: provider.wallet.publicKey,
+        })
+        .rpc();
+    } catch (err) {
+      didFail = true;
+      console.log("expected old-admin pause error:", String(err));
+    }
+
+    assert.equal(didFail, true);
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+
+    assert.equal(vaultConfig.admin.toBase58(), newAdmin.publicKey.toBase58());
+    assert.equal(vaultConfig.paused, false);
+  });
+
+  it("allows new admin to pause vault", async () => {
+    await program.methods
+      .pauseVault()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        admin: newAdmin.publicKey,
+      })
+      .signers([newAdmin])
+      .rpc();
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+
+    console.log("paused after new admin pause:", vaultConfig.paused);
+
+    assert.equal(vaultConfig.admin.toBase58(), newAdmin.publicKey.toBase58());
+    assert.equal(vaultConfig.paused, true);
+  });
+
+  it("allows new admin to unpause vault", async () => {
+    await program.methods
+      .unpauseVault()
+      .accounts({
+        vaultConfig: vaultConfigPda,
+        admin: newAdmin.publicKey,
+      })
+      .signers([newAdmin])
+      .rpc();
+
+    const vaultConfig = await program.account.vaultConfig.fetch(vaultConfigPda);
+
+    console.log("paused after new admin unpause:", vaultConfig.paused);
+
+    assert.equal(vaultConfig.admin.toBase58(), newAdmin.publicKey.toBase58());
+    assert.equal(vaultConfig.paused, false);
   });
 });

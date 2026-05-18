@@ -188,6 +188,25 @@ pub mod token_vault {
 
         Ok(())
     }
+
+    pub fn close_position(ctx: Context<ClosePosition>) -> Result<()> {
+        let user_position = &ctx.accounts.user_position;
+
+        require!(
+            user_position.deposited_amount == 0,
+            VaultError::PositionNotEmpty
+        );
+
+        Ok(())
+    }
+
+    pub fn transfer_admin(ctx: Context<TransferAdmin>) -> Result<()> {
+        let vault_config = &mut ctx.accounts.vault_config;
+
+        vault_config.admin = ctx.accounts.new_admin.key();
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -211,8 +230,8 @@ pub struct InitializeVault<'info> {
     #[account(
         init,
         payer = admin,
-        token::mint = mint,
-        token::authority = vault_authority
+        associated_token::mint = mint,
+        associated_token::authority = vault_authority
     )]
     pub vault_token_account: Account<'info, TokenAccount>,
 
@@ -222,6 +241,8 @@ pub struct InitializeVault<'info> {
     pub admin: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
+
+    pub associated_token_program: Program<'info, AssociatedToken>,
 
     pub system_program: Program<'info, System>,
 }
@@ -388,6 +409,50 @@ pub struct UserWithdraw<'info> {
     pub token_program: Program<'info, Token>,
 }
 
+#[derive(Accounts)]
+pub struct ClosePosition<'info> {
+    #[account(
+        seeds = [b"vault_config", mint.key().as_ref()],
+        bump = vault_config.config_bump,
+        has_one = mint,
+    )]
+    pub vault_config: Account<'info, VaultConfig>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        close = user,
+        seeds = [b"user_position", user.key().as_ref(), mint.key().as_ref()],
+        bump = user_position.bump,
+        has_one = user,
+        has_one = mint
+    )]
+    pub user_position: Account<'info, UserPosition>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct TransferAdmin<'info> {
+    #[account(
+        mut,
+        seeds = [b"vault_config", mint.key().as_ref()],
+        bump = vault_config.config_bump,
+        has_one = admin,
+        has_one = mint,
+    )]
+    pub vault_config: Account<'info, VaultConfig>,
+
+    pub mint: Account<'info, Mint>,
+
+    pub admin: Signer<'info>,
+
+    /// CHECK: This account is only stored as a Pubkey.
+    pub new_admin: UncheckedAccount<'info>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct VaultConfig {
@@ -418,4 +483,7 @@ pub enum VaultError {
 
     #[msg("Insufficient position balance.")]
     InsufficientPositionBalance,
+
+    #[msg("The position is not empty.")]
+    PositionNotEmpty,
 }
